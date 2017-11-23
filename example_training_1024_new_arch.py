@@ -23,7 +23,7 @@ import random, sys, keras
 import pdb
 
 # Load the dataset ...
-dataFile = "DataGen/RML2016.10a_dict.dat"
+dataFile = "Data/RML2016.10a_dict.dat"
 Xd = pickle.load(open(dataFile,'rb'),encoding='latin1') # latin encoding used for python3 support
 # Xd - data (as dictionary)
 
@@ -125,7 +125,7 @@ model.summary()
 
 
 # Set up some params 
-nb_epoch = 2    # number of epochs to train on
+nb_epoch = 100     # number of epochs to train on
 #batch_size = 1024  # training batch size
 # OOM
 batch_size = 256

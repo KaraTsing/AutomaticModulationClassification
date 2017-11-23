@@ -29,7 +29,7 @@ def slice_timeseries(x, l=128, d=64, max_k = None):
         X[i,1,:] /= energy
     return X
 
-# 
+# mainly used to call slice_timeseries on output X[mod_type, snr]
 def slice_timeseries_dict(td, l=128, d=64, max_k = None):
     nd = {}
     for k,v in td.iteritems():

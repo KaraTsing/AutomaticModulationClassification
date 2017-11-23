@@ -1,4 +1,5 @@
 # utility functions
+# most inputs are X[mod_type, snr]
 import numpy as np
 import cPickle
 import matplotlib.pyplot as plt

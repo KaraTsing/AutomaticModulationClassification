@@ -28,11 +28,11 @@ for snr in snr_vals:
                 tx_len = int(20e3)
             src = source_alphabet(alphabet_type, tx_len, True)
             mod = mod_type()
-            fD = 1
-            delays = [0.0, 0.9, 1.7]
-            mags = [1, 0.8, 0.3]
-            ntaps = 8
-            noise_amp = 10**(-snr/10.0)
+            fD = 1 # doppler
+            delays = [0.0, 0.9, 1.7] # PDP delays
+            mags = [1, 0.8, 0.3] # PDP magnitudes
+            ntaps = 8 # multipath FIR filter taps
+            noise_amp = 10**(-snr/10.0) # linear noise value
             print noise_amp
             #noise_amp = 0.1
             chan = channels.dynamic_channel_model( 200e3, 0.01, 1e2, 0.01, 1e3, 8, fD, True, 4, delays, mags, ntaps, noise_amp, 0x1337 )
@@ -41,18 +41,18 @@ for snr in snr_vals:
 
             tb = gr.top_block()
 
-            # connect blocks
+            # connect blocks and run
             if apply_channel:
-                tb.connect(src, mod, chan, snk)
+                tb.connect(src, mod, chan, snk) # connect SRC (source_alphabet) - MOD (mod_type) - CHAN (dyn_chan_model) - SNK (vector_sink)
             else:
                 tb.connect(src, mod, snk)
             tb.run()
 
-            modulated_vector = np.array(snk.data(), dtype=np.complex64)
+            modulated_vector = np.array(snk.data(), dtype=np.complex64) # grab the generated sink vector
             if len(snk.data()) < min_length:
                 min_length = len(snk.data())
                 min_length_mod = mod_type
-            output[(mod_type.modname, snr)] = modulated_vector
+            output[(mod_type.modname, snr)] = modulated_vector # add it to the output dictionary with key=modtype,snr
 
 print "min length mod is %s with %i samples" % (min_length_mod, min_length)
 # trim the beginning and ends, and make all mods have equal number of samples
@@ -60,7 +60,7 @@ start_indx = 100
 fin_indx = min_length-100
 for mod, snr in output:
  output[(mod,snr)] = output[(mod,snr)][start_indx:fin_indx]
-X = timeseries_slicer.slice_timeseries_dict(output, 128, 64, 1000)
+X = timeseries_slicer.slice_timeseries_dict(output, 128, 64, 1000) # don't forget to timeslice this
 cPickle.dump( X, file("RML2014.04c_dict.dat", "wb" ) )
 X = np.vstack(X.values())
 cPickle.dump( X, file("RML2016.04c.dat", "wb" ) )

@@ -23,7 +23,7 @@ import random, sys, keras
 import pdb
 
 # Load the dataset ...
-dataFile = "DataGen/RML2016.10a_dict.dat"
+dataFile = "Data/RML2016.10a_dict_1024.dat"
 Xd = pickle.load(open(dataFile,'rb'),encoding='latin1') # latin encoding used for python3 support
 # Xd - data (as dictionary)
 
@@ -31,6 +31,7 @@ Xd = pickle.load(open(dataFile,'rb'),encoding='latin1') # latin encoding used fo
 snrs,mods = map(lambda j: sorted(list(set(map(lambda x: x[j], Xd.keys())))), [1,0])
 # snrs:  [-20, -18, -16, -14, -12, -10, -8, -6, -4, -2, 0, 2, 4, 6, 8, 10, 12, 14, 16, 18]
 # mods: ['8PSK', 'AM-DSB', 'AM-SSB', 'BPSK', 'CPFSK', 'GFSK', 'PAM4', 'QAM16', 'QAM64', 'QPSK', 'WBFM']
+
 X = []  
 lbl = []
 for mod in mods:
@@ -43,7 +44,7 @@ X = np.vstack(X) # len(X) -> 220,000   len(lbl) -> 220,000
 
 # Partition the data into training and test sets of the form we can train/test on  while keeping SNR and Mod labels handy for each
 np.random.seed(2016)
-n_examples = X.shape[0] # dim(X) -> [220000, 2, 128]
+n_examples = X.shape[0] # dim(X) -> [220000, 2, 1024]
 # split the data into half (training, testing)
 n_train = int(n_examples * 0.5)
 train_idx = np.random.choice(range(0,n_examples), size=n_train, replace=False)
@@ -61,14 +62,14 @@ def to_onehot(yy):
 Y_train = to_onehot(map(lambda x: mods.index(lbl[x][0]), train_idx))
 Y_test = to_onehot(map(lambda x: mods.index(lbl[x][0]), test_idx))
 	
-# set the input shape [2,128]
+# set the input shape [2,1024]
 in_shp = list(X_train.shape[1:])
-print (X_train.shape, in_shp) # (110000, 2, 128) [2, 128]
+print (X_train.shape, in_shp) # (110000, 2, 1024) [2, 1024]
 classes = mods
 
 
 # Build VT-CNN2 Neural Net model using Keras primitives -- 
-#  - Reshape [N,2,128] to [N,1,2,128] on input
+#  - Reshape [N,2,1024] to [N,1,2,1024] on input
 #  - Pass through 2 2DConv/ReLu layers
 #  - Pass through 2 Dense layers (ReLu and Softmax)
 #  - Perform categorical cross entropy optimization
@@ -125,7 +126,7 @@ model.summary()
 
 
 # Set up some params 
-nb_epoch = 2    # number of epochs to train on
+nb_epoch = 100     # number of epochs to train on
 #batch_size = 1024  # training batch size
 # OOM
 batch_size = 256
@@ -141,7 +142,7 @@ history = model.fit(X_train,
                     validation_data=(X_test, Y_test),
                     callbacks = [
         keras.callbacks.ModelCheckpoint(filepath, save_best_only=True),
-        keras.callbacks.EarlyStopping(patience=5)
+        keras.callbacks.EarlyStopping(patience=10, verbose=1)
         ])
 
 # we re-load the best weights once training is finished
