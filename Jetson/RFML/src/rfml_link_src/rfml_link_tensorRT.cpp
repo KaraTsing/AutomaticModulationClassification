@@ -1,0 +1,362 @@
+#include <assert.h>
+#include <fstream>
+#include <sstream>
+#include <iostream>
+#include <cmath>
+#include <algorithm>
+#include <sys/stat.h>
+#include <time.h>
+#include <cuda_runtime_api.h>
+#include <iomanip>
+
+#include "NvInfer.h"
+#include "NvCaffeParser.h"
+
+using namespace nvinfer1;
+using namespace nvcaffeparser1;
+
+#define CHECK(status)							\
+  {									\
+    if (status != 0)							\
+      {									\
+	std::cout << "Cuda failure: " << status;			\
+	abort();							\
+      }									\
+  }
+
+// stuff we know about the network and the caffe input/output blobs
+static const int INPUT_H = 2;
+static const int INPUT_W = 128;
+static const int OUTPUT_SIZE = 11;
+
+const char* INPUT_BLOB_NAME = "data";
+const char* OUTPUT_BLOB_NAME = "loss";
+
+// Logger for GIE info/warning/errors
+class Logger : public ILogger			
+{
+  void log(Severity severity, const char* msg) override
+  {
+    // suppress info-level messages
+    if (severity != Severity::kINFO)
+      std::cout << msg << std::endl;
+  }
+} gLogger;
+
+void bar_graph(float vec[], std::string labels[], int length, int screen_width)
+{
+  for (int j = 0; j < screen_width; j++)
+    {
+        std::cout << "-";
+    }
+    
+    std::cout << "\n";
+    
+    for (int i = 0; i < length; i++)
+    {
+        int current_line_width = round(screen_width*vec[i]);
+	std::cout << labels[i] << ": " << std::fixed << std::setw(6) << std::setprecision(6) << 100*vec[i] << "% ";
+        for(int j = 0; j < current_line_width; j++)
+        {
+            std::cout << "|";
+        }
+        std::cout << "\n";
+    }
+    for (int j = 0; j < screen_width; j++)
+    {
+        std::cout << "-";
+    }
+        std::cout << "\n";
+}
+
+std::string locateFile(const std::string& input)
+{
+  std::string file = "data/samples/rfml_data/" + input;
+  struct stat info;
+  int i, MAX_DEPTH = 10;
+  for (i = 0; i < MAX_DEPTH && stat(file.c_str(), &info); i++)
+    file = "../" + file;
+  
+  if (i == MAX_DEPTH)
+    {
+      file = std::string("data/rfml_data/") + input;
+      for (i = 0; i < MAX_DEPTH && stat(file.c_str(), &info); i++)
+	file = "../" + file;		
+    }
+  
+  assert(i != MAX_DEPTH);
+  
+  return file;
+}
+
+union char2float
+{
+  float f;
+  unsigned char c[4];
+};
+
+float char_arr_2_float(char char_arr[])
+{
+  char2float cf;
+  cf.c[0] = char_arr[0];
+  cf.c[1] = char_arr[1];
+  cf.c[2] = char_arr[2];
+  cf.c[3] = char_arr[3];
+  return cf.f;
+}
+
+// simple PGM (portable greyscale map) reader
+//void readPGMFile(const std::string& fileName,  uint8_t buffer[INPUT_H*INPUT_W])
+//{
+  //std::ifstream infile(locateFile(fileName), std::ifstream::binary);
+	//std::string magic, h, w, max;
+	//infile >> magic >> h >> w >> max;
+	//infile.seekg(1, infile.cur);
+	//	infile.read(reinterpret_cast<char*>(buffer), INPUT_H*INPUT_W);
+	//}
+
+
+
+// simple float vector file reader
+void readFloatVec(const std::string& fileName, float f_buffer[INPUT_H*INPUT_W], int skipBytes)
+{
+  uint8_t char_I_buffer[INPUT_W*sizeof(float)];
+  uint8_t char_Q_buffer[INPUT_W*sizeof(float)];
+  
+  std::ifstream infile(locateFile(fileName), std::ifstream::binary);
+
+  // get file length:
+  infile.seekg(0, infile.end);
+  int file_len = infile.tellg();
+  infile.seekg(0, infile.beg);
+  //std::cout << "File length: " << file_len << std::endl;
+  //int vec_len = file_len/sizeof(float)/2;
+  //std::cout << "Q/I vector length: " << vec_len << std::endl;
+
+  // first read Q data
+  //std::cout << "starting position of file: " << infile.tellg() << ". Expected: 0" << std::endl;
+  infile.ignore(skipBytes*4);
+  //std::cout << "after skipping: " << infile.tellg() << ":" << infile.tellg()/4 << ". Expected: " << skipBytes << std::endl;
+
+  infile.read(reinterpret_cast<char*>(char_Q_buffer), INPUT_W*4); 
+  for (int i = 0; i < INPUT_W; i++)
+  {
+    char charr[4];
+    charr[0] = char_Q_buffer[i*4];
+    charr[1] = char_Q_buffer[i*4+1];
+    charr[2] = char_Q_buffer[i*4+2];
+    charr[3] = char_Q_buffer[i*4+3];
+    f_buffer[i] = char_arr_2_float(charr);
+  }
+  //std::cout << "first Q point: " << f_buffer[0] << "\n";
+  //std::cout << "finished Q data: " << infile.tellg() << ":" << infile.tellg()/4 << ". Expected: " << skipBytes+INPUT_W  << std::endl;
+
+  // move to the end of the Q vector and start on the I vector
+  infile.ignore(file_len/2 - skipBytes*4 - INPUT_W*4);
+  // std::cout << "Start of I: " << infile.tellg() << ":" << infile.tellg()/4 << ". Expected: " << vec_len << std::endl;
+  
+  // now read I data 
+  infile.ignore(skipBytes*4);
+
+  //std::cout << "after skipping in I: " << infile.tellg() << ":" << infile.tellg()/4 << ". Expected: " << vec_len + skipBytes << std::endl;
+  
+  infile.read(reinterpret_cast<char*>(char_I_buffer), INPUT_W*4); 
+  for (int i = 0; i < INPUT_W; i++)
+  {
+    char charr[4];
+    charr[0] = char_I_buffer[i*4];
+    charr[1] = char_I_buffer[i*4+1];
+    charr[2] = char_I_buffer[i*4+2];
+    charr[3] = char_I_buffer[i*4+3];
+    f_buffer[i+INPUT_W] = char_arr_2_float(charr);
+  }
+
+  //std::cout << "at end: " << infile.tellg() <<":" << infile.tellg()/4 <<  ". Expected: " << vec_len + skipBytes +INPUT_W << std::endl;
+  //std::cout << "first I point: " << f_buffer[INPUT_W] << "\n";
+  
+  // try writing the new float buffer back to file
+  // std::ofstream out(fileName+"v2.dat", std::ios_base::binary);
+  // if (out.good())
+  //   {
+  //  out.write((char *)&f_buffer, sizeof(float));
+  // }
+
+}
+
+
+void caffeToGIEModel(const std::string& deployFile,				// name for caffe prototxt
+		     const std::string& modelFile,				// name for model 
+		     const std::vector<std::string>& outputs,   // network outputs
+		     unsigned int maxBatchSize,					// batch size - NB must be at least as large as the batch we want to run with)
+		     IHostMemory *&gieModelStream)    // output buffer for the GIE model
+{
+	// create the builder
+	IBuilder* builder = createInferBuilder(gLogger);
+
+	// parse the caffe model to populate the network, then set the outputs
+	INetworkDefinition* network = builder->createNetwork();
+	ICaffeParser* parser = createCaffeParser();
+	const IBlobNameToTensor* blobNameToTensor = parser->parse(locateFile(deployFile).c_str(),
+								  locateFile(modelFile).c_str(),
+								  *network,
+								  DataType::kFLOAT);
+
+	// specify which tensors are outputs
+	for (auto& s : outputs)
+		network->markOutput(*blobNameToTensor->find(s.c_str()));
+
+	// Build the engine
+	builder->setMaxBatchSize(maxBatchSize);
+	builder->setMaxWorkspaceSize(1 << 20);
+
+	ICudaEngine* engine = builder->buildCudaEngine(*network);
+	assert(engine);
+
+	// we don't need the network any more, and we can destroy the parser
+	network->destroy();
+	parser->destroy();
+
+	// serialize the engine, then close everything down
+	gieModelStream = engine->serialize();
+	engine->destroy();
+	builder->destroy();
+	shutdownProtobufLibrary();
+}
+
+void doInference(IExecutionContext& context, float* input, float* output, int batchSize)
+{
+	const ICudaEngine& engine = context.getEngine();
+	// input and output buffer pointers that we pass to the engine - the engine requires exactly IEngine::getNbBindings(),
+	// of these, but in this case we know that there is exactly one input and one output.
+	assert(engine.getNbBindings() == 2);
+	void* buffers[2];
+
+	// In order to bind the buffers, we need to know the names of the input and output tensors.
+	// note that indices are guaranteed to be less than IEngine::getNbBindings()
+	int inputIndex = engine.getBindingIndex(INPUT_BLOB_NAME), 
+	  outputIndex = engine.getBindingIndex(OUTPUT_BLOB_NAME);
+
+	// create GPU buffers and a stream
+	CHECK(cudaMalloc(&buffers[inputIndex], batchSize * INPUT_H * INPUT_W * sizeof(float)));
+	CHECK(cudaMalloc(&buffers[outputIndex], batchSize * OUTPUT_SIZE * sizeof(float)));
+
+	cudaStream_t stream;
+	CHECK(cudaStreamCreate(&stream));
+
+	// DMA the input to the GPU,  execute the batch asynchronously, and DMA it back:
+	CHECK(cudaMemcpyAsync(buffers[inputIndex], input, batchSize * INPUT_H * INPUT_W * sizeof(float), cudaMemcpyHostToDevice, stream));
+	context.enqueue(batchSize, buffers, stream, nullptr);
+	CHECK(cudaMemcpyAsync(output, buffers[outputIndex], batchSize * OUTPUT_SIZE*sizeof(float), cudaMemcpyDeviceToHost, stream));
+	cudaStreamSynchronize(stream);
+
+	// release the stream and the buffers
+	cudaStreamDestroy(stream);
+	CHECK(cudaFree(buffers[inputIndex]));
+	CHECK(cudaFree(buffers[outputIndex]));
+}
+
+
+int main(int argc, char** argv)
+{
+  std::cout << "\nstarting RFML link engine\n" << std::endl;
+  
+  // create a GIE model from the caffe model and serialize it to a stream
+  IHostMemory *gieModelStream{nullptr};
+  caffeToGIEModel("rfml_deploy.prototxt", "snapshot_iter_10000.caffemodel", std::vector < std::string > { OUTPUT_BLOB_NAME }, 1, gieModelStream);
+  
+  // read a random digit file
+  //srand(unsigned(time(nullptr)));
+  //uint8_t fileData[INPUT_H*INPUT_W];
+  //int num = rand() % 10;
+  //readPGMFile(std::to_string(num) + ".pgm", fileData);
+  
+  if (argc < 2)
+    {
+      std::cout << std::endl << "supply the filename of a data vector in the data directory" << std::endl;
+      return -1;
+    }
+  std::string filename = argv[1];
+ 
+  //std::cout << "\nreading data file" << filename <<"\n";
+  // read a vector file
+  float fileData[INPUT_H*INPUT_W];
+  int skipBytes = 128; // ignore transient capture data
+  readFloatVec(filename, fileData, skipBytes);
+	
+  // print an ascii representation
+  //std::cout << "\n\n\n---------------------------" << "\n\n\n" << std::endl;
+  //for (int i = 0; i < INPUT_H*INPUT_W; i++)
+  //	std::cout << (" .:-=+*#%@"[fileData[i] / 26]) << (((i + 1) % INPUT_W) ? "" : "\n");
+  
+  // parse the mean file and 	subtract it from the image
+  //ICaffeParser* parser = createCaffeParser();
+  //IBinaryProtoBlob* meanBlob = parser->parseBinaryProto(locateFile("mnist_mean.binaryproto").c_str());
+  //parser->destroy();
+  
+  //const float *meanData = reinterpret_cast<const float*>(meanBlob->getData());
+  
+  //float data[INPUT_H*INPUT_W];
+  //for (int i = 0; i < INPUT_H*INPUT_W; i++)
+  //	data[i] = float(fileData[i])-meanData[i];
+  //
+  //meanBlob->destroy();
+
+  //std::cout << "deserializing the engine" << "\n";
+    
+  // deserialize the engine 
+  IRuntime* runtime = createInferRuntime(gLogger);
+  ICudaEngine* engine = runtime->deserializeCudaEngine(gieModelStream->data(), gieModelStream->size(), nullptr);
+  if (gieModelStream) gieModelStream->destroy();
+
+  IExecutionContext *context = engine->createExecutionContext();
+
+  // run inference
+  float prob[OUTPUT_SIZE];
+  doInference(*context, fileData, prob, 1);
+
+  // run inference engine three times on different parts of the data. 
+  // float prob1[OUTPUT_SIZE];
+  // float prob2[OUTPUT_SIZE];
+  // float prob3[OUTPUT_SIZE];
+
+  // int skipBytes = 128*2; // skip first 128 complex samples
+  // doInference(*context, fileData, prob1, 1, skipBytes);
+  // doInference(*context, fileData, prob2, 1, INPUT_W+skipBytes);
+  // doInference(*context, fileData, prob3, 1, 2*INPUT_W+skipBytes);
+  
+  // destroy the engine
+  context->destroy();
+  engine->destroy();
+  runtime->destroy();
+
+  // print a histogram of the output distribution
+  //std::cout << "\n\n";
+  //float val{0.0f};
+  //int idx{0};
+  //for (unsigned int i = 0; i < 10; i++)
+  //{
+  //val = std::max(val, prob[i]);
+  //if (val == prob[i]) idx = i;
+  //	std::cout << i << ": " << std::string(int(std::floor(prob[i] * 10 + 0.5f)), '*') << "\n";
+  //}
+  //std::cout << std::endl;
+  
+  //return (idx == num && val > 0.9f) ? EXIT_SUCCESS : EXIT_FAILURE;
+  std::string mods[] = {"8PSK  ", "AM-DSB", "AM-SSB", "BPSK  ", "CPFSK ", "GFSK  ", "PAM4  ", "QAM16 ", "QAM64 ", "QPSK  ", "WBFM  "};
+  
+  //float val{0.0f};
+  //int idx = 0;
+  // std::cout << std::endl << std::endl;
+  // for (int i = 0; i < 11; i++)
+  //   {
+  //     //val = std::max(val, prob[i]);
+  //     //if (val > prob[i])
+  //     //{
+  //     //idx = i;
+  //     //}
+  //     std::cout << mods[i] << ": " << prob[i] << std::endl;
+      
+  //   }
+  std::cout << std::endl << std::endl;
+  bar_graph(prob, mods, 11, 60);
+}

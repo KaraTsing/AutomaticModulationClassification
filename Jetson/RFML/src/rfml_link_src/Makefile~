@@ -1,0 +1,4 @@
+OUTNAME_RELEASE = rfml
+OUTNAME_DEBUG   = rfml_debug
+MAKEFILE ?= Makefile.$(OUTNAME_RELEASE)
+include $(MAKEFILE)
